@@ -184,11 +184,7 @@ def extrude_buildings(footprints, center):
 
     #ADICIONADO PARA RESOLVER a forma como o tileset está representado no cesium ion
     city_mesh = city_mesh.triangulate()
-    city_mesh = city_mesh.clean()
-    city_mesh = city_mesh.compute_normals(
-            consistent_normals=True,
-            auto_orient_normals=True,
-            inplace=False)
+    city_mesh = city_mesh.compute_normals(auto_orient_normals=True)
 
     print("Building extrusion complete")
     return city_mesh, instances_building

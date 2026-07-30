@@ -377,15 +377,13 @@ pl.add_mesh(tree_mesh, color="green")
 pl.remove_scalar_bar()
 pl.show(title='3D test')
 
-
-
 # Check CRS to confirm they are both the same
 print("Buildings CRS:", buildings.crs)
 print("Trees CRS:", trees.crs)
 
 #Check DEM files CRS to confirm they are the same as the previous code 
-dem_path = "/home/ritabarco/Documents/OSMFilesTests/DEM/MDT-50cm-112198-07-2024_v01.tiff"
-geoid_path = "/home/ritabarco/Documents/OSMFilesTests/DEM/egm2008-2.5.tif"
+dem_path = "/home/ritabarco/Documents/OSMFilesTests/GeoData/MDT-50cm-112198-07-2024_v01.tiff"
+geoid_path = "/home/ritabarco/Documents/OSMFilesTests/GeoData/egm2008-2.5.tif"
 dem = rasterio.open(dem_path)
 geoid = rasterio.open(geoid_path)
 
