@@ -1,0 +1,24 @@
+# Large geospatial data
+*.osm.pbf
+*.tif
+*.tiff
+
+# Large 3D/generated files
+*.obj
+*.obj.mtl
+*.glb
+*.gltf
+
+# Python virtual environment
+.venv/
+
+# Cache
+cache/
+
+# Generated output
+output/
+tree_tiles_ouput/
+
+# Python cache
+__pycache__/
+*.pyc

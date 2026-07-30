@@ -1,0 +1,54 @@
+from pyrosm import OSM, get_data
+from geocube.api.core import make_geocube
+from shapely.geometry import box
+import numpy as np
+
+# Download OSM data
+fp = get_data("Portugal")
+
+# Lisbon bounding box
+lisbon_bbox = [-9.150, 38.720, -9.130, 38.735]
+
+# Load OSM
+osm = OSM(fp, bounding_box=lisbon_bbox)
+roads = osm.get_network(network_type="driving")
+
+# Clean geometries
+roads = roads[roads.geometry.notnull()]
+
+# 🔹 Project to metric CRS for proper rasterization
+roads = roads.to_crs(3763)  # Portugal TM06
+
+# 🔹 Give roads some width (IMPORTANT for visibility)
+roads["geometry"] = roads.buffer(5)  # 5 meters
+
+# Assign white pixel value
+roads["pixel_value"] = 255
+
+# Define raster extent
+geom = box(*roads.total_bounds)
+
+# Rasterize (10m resolution)
+rasterized = make_geocube(
+    vector_data=roads,
+    measurements=["pixel_value"],
+    resolution=(20, -20),
+    geom=geom,
+)
+
+# 🔹 Replace NaN with 0 (black background)
+rasterized["pixel_value"] = rasterized["pixel_value"].fillna(0)
+
+# 🔹 Convert to 8-bit (important for Cesium)
+rasterized["pixel_value"] = rasterized["pixel_value"].astype("uint8")
+
+# 🔹 Set nodata value
+rasterized.rio.write_nodata(0, inplace=True)
+
+# 🔹 Reproject to WGS84 (required for Cesium)
+rasterized = rasterized.rio.reproject("EPSG:4326")
+
+# 🔹 Save
+rasterized.rio.to_raster("lisbon_roads_overlay.tif")
+
+print('Done!')

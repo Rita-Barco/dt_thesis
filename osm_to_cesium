@@ -1,0 +1,366 @@
+import osmnx as ox
+import numpy as np
+import pyvista as pv
+from shapely.geometry import Polygon, MultiPolygon
+from pathlib import Path
+import random
+import math
+import numpy as np
+from pyproj import Transformer
+
+#Extract OSM data
+
+def extract_osm_data_bbox(north, south, east, west):
+    
+    bbox = [west, south, east, north]
+
+    print("Downloading OSM data for bounding box...")
+
+    # Buildings
+    buildings = ox.features_from_bbox(bbox,
+        tags={'building': True}
+    )
+
+    # Streets
+    streets = ox.graph_from_bbox(bbox,
+        network_type='drive',
+        simplify=False
+    )
+    #Trees
+    trees = ox.features_from_bbox(bbox,
+        tags={'natural':'tree'}
+    )
+    
+
+    buildings = ox.projection.project_gdf(buildings)
+    streets = ox.project_graph(streets)
+    trees = ox.projection.project_gdf(trees)
+
+
+
+    print(f"Downloaded {len(buildings)} buildings")
+    print(f"Downloaded {len(streets.edges)} street segments")
+
+    minx, miny, maxx, maxy = buildings.total_bounds
+    center_x = (minx + maxx) / 2
+    center_y = (miny + maxy) / 2
+
+    return buildings, streets, trees, (center_x, center_y)
+
+#Generate building footprints
+
+def parse_height(value):
+    if not value:
+        return None
+    try:
+        return float(str(value).replace("m", "").split(";")[0])
+    except:
+        return None
+
+def is_missing(value):
+    return value is None or (isinstance(value, float) and np.isnan(value))
+
+def generate_footprints(buildings):
+    footprints = []
+
+    for _, row in buildings.iterrows():
+        geom = row.geometry
+
+        # Extract height info once here
+        height = parse_height(row.get('height'))
+        levels = parse_height(row.get('building:levels'))
+
+        if  is_missing(height) and not is_missing(levels):
+            height = levels * 3  # 3m per floor
+
+        if is_missing(height):
+            # fallback
+            height = random.uniform(3, 6)
+
+        def add_poly(poly):
+            footprints.append({
+                "geometry": poly,
+                "height": height
+            })
+
+        if isinstance(geom, MultiPolygon):
+            for poly in geom.geoms:
+                add_poly(poly)
+        elif isinstance(geom, Polygon):
+            add_poly(geom)
+
+    return footprints
+
+
+
+# def generate_footprints(buildings):
+    footprints = []
+    for geom in buildings.geometry:
+        if isinstance(geom, MultiPolygon):
+            #Split multipolygons into individual polygons
+            footprints.extend(list(geom.geoms))
+        elif isinstance(geom, Polygon):
+            #Add single polygons
+            footprints.append(geom)
+
+            #Skip points and other geometry types
+    
+    return footprints#
+
+#Generate 3D Buildings
+
+def create_waterlight_building(coords, height):
+    #Remve duplicate last point from coords
+    coords= coords[:-1]
+    n_points = len(coords)
+    # create points for base and top
+
+    base_points = np.column_stack((coords, np.zeros(len(coords))))
+    top_points = np.column_stack((coords, np.full(len(coords), height)))
+
+    points = np.vstack((base_points, top_points))
+
+    #Create faces 
+    faces = []
+
+    #Add base (as triangle fan)
+    base_face = [n_points] + list(range(n_points))
+    faces.extend(base_face)
+
+    #Add roof as triangle fan 
+    roof_indices = list(range(n_points, n_points * 2))
+    roof_face = [n_points] + roof_indices
+    faces.extend(roof_face)
+
+    #Add walls (as quads)
+    for i in range(n_points):
+        next_i = (i+1) % n_points
+        wall_face = [4, #quad
+                     i, next_i, #bottom points
+                     n_points + next_i, n_points + i ] #top points 
+        faces.extend(wall_face)
+    
+    return points, faces
+
+def generate_random_color():
+
+    return [random.random() for _ in range(3)]
+
+def extrude_buildings(footprints, center):
+
+    print("Extruding buildings...")
+
+    # Create empty Pyvista mesh for the final city 
+    city_mesh = pv.PolyData()
+    instances_building = []
+    for footprint in footprints:
+        # get coordinates from footprint 
+        #coords = np.array(footprint.exterior.coords)
+        coords = np.array(footprint["geometry"].exterior.coords)
+
+        # Apply local origin shift
+        coords[:, 0] -= center[0]
+        coords[:, 1] -= center[1]
+
+        height = footprint["height"]
+
+        # create waterlight building geometry
+        points, faces = create_waterlight_building(coords, height)
+
+        # create building mesh
+        building = pv.PolyData(points, np.array(faces))
+        building.rotate_x(-90, inplace=True)
+
+        # generate and apply random color 
+        color = generate_random_color()
+        building['color']= np.tile(color, (building.n_points, 1))
+        instances_building.append(building)
+
+        # add city mesh
+        if city_mesh.n_points == 0:
+            city_mesh = building
+        else:
+            city_mesh = city_mesh.merge(building, merge_points=False)
+
+    #ADICIONADO PARA RESOLVER a forma como o tileset está representado no cesium ion
+    city_mesh = city_mesh.triangulate()
+    city_mesh = city_mesh.clean()
+    city_mesh = city_mesh.compute_normals(
+            consistent_normals=True,
+            auto_orient_normals=True,
+            inplace=False)
+
+    print("Building extrusion complete")
+    return city_mesh, instances_building
+
+
+#Create tree meshes
+
+def create_tree_meshes(trees, center):
+    tree_mesh = pv.PolyData()
+
+    for _, row in trees.iterrows():
+
+        geom = row.geometry
+
+        # skip invalid geometries
+        if geom is None or geom.geom_type != "Point":
+            continue
+
+        x = geom.x - center[0]
+        y = geom.y - center[1]
+
+        # trunk
+        trunk = pv.Cylinder(
+            center=(x, 1.0, -y),
+            direction=(0, 1, 0),
+            radius=0.15,
+            height=2.0,
+            resolution=12
+        )
+
+        # canopy
+        canopy = pv.Sphere(
+            radius=1.0,
+            center=(x, 3.0, -y),
+            theta_resolution=12,
+            phi_resolution=12
+        )
+
+        tree = trunk.merge(canopy)
+
+        if tree_mesh.n_points == 0:
+            tree_mesh = tree
+        else:
+            tree_mesh = tree_mesh.merge(tree, merge_points=False)
+
+    return tree_mesh
+
+
+# Building export function
+
+def save_to_obj(mesh, output_path):
+    #create output directory if it doesn't exist
+
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok = True)
+
+    # save mesh as obj
+    print(f"Saving model tp {output_path}")
+    mesh.save(output_path)
+    print("Export complete")
+
+def streetGraph_to_pyvista(st_graph):
+    #convert the graph to a dataframe
+    nodes, edges = ox.graph_to_gdfs(st_graph)
+
+    #convert the edges to a pyvista PolyData object with lines 
+    pts_list = edges["geometry"].apply(lambda g: np.column_stack(
+        (g.xy[0], g.xy[1], np.zeros(len(g.xy[0]))))).tolist()
+    vertices = np.concatenate(pts_list)
+
+    lines = [] #create an empty array with 3 columns
+
+    j = 0
+
+    for i in range(len(pts_list)):
+        pts = pts_list[i]
+        vertex_length = len(pts)
+        vertex_start = j
+        vertex_end = j + vertex_length - 1
+        vertex_arr = [vertex_length] +  \
+            list(range(vertex_start, vertex_end +1)) 
+        lines.append(vertex_arr)
+        j += vertex_length
+    
+    return pv.PolyData(vertices, lines=np.hstack(lines))
+
+
+
+def save_to_gltf(mesh, output_path, use_rgb=False):
+
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    mesh = mesh.triangulate()
+
+    pl = pv.Plotter(off_screen=True)
+
+    if use_rgb and 'color' in mesh.array_names:
+        pl.add_mesh(mesh, rgb=True, scalars='color')
+    else:
+        pl.add_mesh(mesh)
+
+    pl.export_gltf(output_path)
+
+    print(f"Saved glTF to {output_path}")
+
+
+
+#Opção para criar uma bounding box especifica de uma cidade apenas escrevendo o nome da cidade e o país
+
+# location = "Lisbon, Portugal"
+# gdf = ox.geocode_to_gdf(location)
+
+# north, south, east, west = gdf.total_bounds[3], gdf.total_bounds[1], gdf.total_bounds[2], gdf.total_bounds[0]
+
+#Lisboa
+# location = "Lisbon, Portugal"
+# north = 38.75
+# south = 38.70
+# east  = -9.10
+# west  = -9.18
+
+#IST 
+location = "IST, Lisboa"
+
+north = 38.738662
+south = 38.734335
+east  = -9.133657
+west  = -9.141703
+
+#Academia Militar 
+# location = "Academia Militar, Amadora"
+
+# north = 38.756928
+# south = 38.748277
+# east  = -9.239877
+# west  = -9.243364
+
+buildings, streets, trees, center = extract_osm_data_bbox(north, south, east, west)
+footprints = generate_footprints(buildings)
+mesh, bd_instances = extrude_buildings(footprints, center)
+street_mesh = streetGraph_to_pyvista(streets)
+tree_mesh = create_tree_meshes(trees, center)
+
+
+output_dir  = "output/"+location.split(",")[0]
+
+output_file = output_dir+"/buildings.obj"
+output_streets = output_dir+"/streets.obj"
+output_trees = output_dir+"/trees.obj"
+save_to_obj(mesh, output_file)
+save_to_obj(street_mesh, output_streets)
+save_to_obj(tree_mesh, output_trees)
+
+
+save_to_gltf(mesh,
+             output_dir + "/buildings.glb",
+             use_rgb=True)
+
+# save_to_gltf(street_mesh,
+#              output_dir + "/streets.glb")
+
+save_to_gltf(tree_mesh,
+             output_dir + "/trees.glb")
+
+
+# Get Cesium tileset center 
+transformer = Transformer.from_crs(buildings.crs, "EPSG:4326", always_xy=True)
+lon, lat = transformer.transform(center[0], center[1])
+print("Insert lat, lon in cesium: ", lat,",", lon)
+pl = pv.Plotter(border=False)
+pl.add_mesh(mesh, scalars = mesh['color'], cmap="tab20", show_edges = False)
+pl.add_mesh(tree_mesh, color="green")
+pl.remove_scalar_bar()
+pl.show(title='3D test')

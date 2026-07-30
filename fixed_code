@@ -1,0 +1,501 @@
+import osmnx as ox
+import numpy as np
+import pyvista as pv
+from shapely.geometry import Polygon, MultiPolygon
+from pathlib import Path
+import random
+from pyproj import Transformer
+import trimesh
+from trimesh.visual.material import SimpleMaterial
+import rasterio
+
+
+# EXTRACT DATA
+def extract_osm_data_bbox(north, south, east, west):
+    bbox = [west, south, east, north]
+    print("Downloading OSM data for bounding box...")
+
+    buildings = ox.features_from_bbox(bbox, tags={'building': True})
+    trees = ox.features_from_bbox(bbox, tags={'natural': 'tree'})
+
+    # Project to local CRS
+    buildings = ox.projection.project_gdf(buildings, to_crs="3763")
+    trees = ox.projection.project_gdf(trees, to_crs="3763")
+
+    print(f"Downloaded {len(buildings)} buildings and {len(trees)} trees.")
+
+    minx, miny, maxx, maxy = buildings.total_bounds
+    center_x = (minx + maxx) / 2
+    center_y = (miny + maxy) / 2
+
+    return buildings, trees, (center_x, center_y)
+
+
+# GENERATE FOOTPRINTS
+def parse_height(value):
+    if not value:
+        return None
+    try:
+        return float(str(value).replace("m", "").split(";")[0])
+    except:
+        return None
+
+def is_missing(value):
+    return value is None or (isinstance(value, float) and np.isnan(value))
+
+def generate_footprints(buildings):
+    footprints = []
+    for _, row in buildings.iterrows():
+        geom = row.geometry
+        height = parse_height(row.get('height'))
+        levels = parse_height(row.get('building:levels'))
+
+        if is_missing(height) and not is_missing(levels):
+            height = levels * 3 
+        if is_missing(height):
+            height = random.uniform(3, 12) # Kept fallback realistic
+
+        def add_poly(poly):
+            footprints.append({"geometry": poly, "height": height})
+
+        if isinstance(geom, MultiPolygon):
+            for poly in geom.geoms:
+                add_poly(poly)
+        elif isinstance(geom, Polygon):
+            add_poly(geom)
+
+    return footprints
+
+
+# EXTRUDE BUILDINGS 
+def generate_random_color():
+    return [random.random() for _ in range(3)]
+
+
+def get_elevation_at_point(x_3763, y_3763, dem_map, geoid_map, to_4326_transformer):
+    # Obtain orthometric altitude using local projected coordinates (x, y)
+    alt_orthometric = next(dem_map.sample([(x_3763, y_3763)]))[0]
+    
+    # Convert EPSG:3763 back to LLA (Lon, Lat) to sample the Geoid map
+    lon, lat = to_4326_transformer.transform(x_3763, y_3763)
+    
+    # Obtain geoid altitude using global coordinates (lon, lat)
+    alt_geoid = next(geoid_map.sample([(lon, lat)]))[0]
+    
+    print(f"MDT: {alt_orthometric:.2f}m | Geoid: {alt_geoid:.2f}m | Total: {alt_orthometric + alt_geoid:.2f}m")
+    return alt_orthometric + alt_geoid
+    
+
+# def extrude_buildings(footprints, center):
+#     print("Extruding buildings...")
+#     instances_building = []
+
+#     for footprint in footprints:
+#         poly = footprint["geometry"]
+#         height = footprint["height"]
+
+#         # 1. Get exterior coordinates and center them
+#         coords = np.array(poly.exterior.coords)
+#         coords[:, 0] -= center[0]
+#         coords[:, 1] -= center[1]
+        
+#         # 2. Create 2D flat face in PyVista (Z=0)
+#         # PyVista wants a face array padding format: [num_points, id0, id1, ...]
+#         n_pts = len(coords) - 1 # drop duplicate last point
+#         points_2d = np.column_stack((coords[:-1], np.zeros(n_pts)))
+#         faces_2d = np.hstack([[n_pts], list(range(n_pts))])
+        
+#         building_flat = pv.PolyData(points_2d, faces_2d)
+        
+#         # 3. Native, watertight extrusion along the Z axis (STAYING Z-UP!)
+#         building_3d = building_flat.extrude((0, 0, height), capping=True)
+
+#         # Apply random color per building
+#         color = generate_random_color()
+#         building_3d['color'] = np.tile(color, (building_3d.n_points, 1))
+        
+#         instances_building.append(building_3d)
+
+#     # Fast O(N) merge instead of continuous loop merging
+#     print("Merging building meshes...")
+#     city_mesh = pv.merge(instances_building) if instances_building else pv.PolyData()
+    
+#     city_mesh = city_mesh.triangulate()
+#     city_mesh = city_mesh.compute_normals(auto_orient_normals=True)
+
+#     print("Building extrusion complete")
+#     return city_mesh, instances_building
+
+
+# def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transformer):
+#     print("Extruding buildings with DEM data...")
+#     instances_building = []
+
+#     for footprint in footprints:
+#         poly = footprint["geometry"]
+#         height = footprint["height"]
+
+#         # A. Find the absolute map coordinates of the building's center
+#         abs_centroid = poly.centroid
+        
+#         # B. Use the teacher's logic to pull the true ground height
+#         ground_z = get_elevation_at_point(
+#             abs_centroid.x, abs_centroid.y, 
+#             dem_src, geoid_src, to_4326_transformer
+#         )
+
+#         # Shift footprint coordinates to local center origin
+#         coords = np.array(poly.exterior.coords)
+#         coords[:, 0] -= center[0]
+#         coords[:, 1] -= center[1]
+        
+#         n_pts = len(coords) - 1
+        
+#         # C. Set the base of the flat building shape to the ground_z value
+#         points_2d = np.column_stack((coords[:-1], np.full(n_pts, ground_z)))
+#         faces_2d = np.hstack([[n_pts], list(range(n_pts))])
+        
+#         building_flat = pv.PolyData(points_2d, faces_2d)
+        
+#         # D. Native Z-up extrusion (Height builds up cleanly from the sloped ground)
+#         building_3d = building_flat.extrude((0, 0, height), capping=True)
+
+#         color = generate_random_color()
+#         building_3d['color'] = np.tile(color, (building_3d.n_points, 1))
+#         instances_building.append(building_3d)
+
+#     # Fast O(N) merge optimization
+#     city_mesh = pv.merge(instances_building) if instances_building else pv.PolyData()
+#     city_mesh = city_mesh.triangulate().compute_normals(auto_orient_normals=True)
+#     return city_mesh, instances_building
+
+
+
+### CONSIDERING THE ALTITUDE OF THE CENTROID OF THE BUILDING ###
+
+def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transformer):
+    print("Extruding buildings with DEM data...")
+    instances_building = []
+
+    for footprint in footprints:
+        poly = footprint["geometry"]
+        height = footprint["height"]
+
+        # A. Find the absolute map coordinates of the building's center
+        abs_centroid = poly.centroid
+         
+        # B. Use the teacher's logic to pull the true ground height
+        ground_z = get_elevation_at_point(
+            abs_centroid.x, abs_centroid.y, 
+            dem_src, geoid_src, to_4326_transformer
+        )
+
+        # Shift footprint coordinates to local center origin
+        coords = np.array(poly.exterior.coords)
+        coords[:, 0] -= center[0]
+        coords[:, 1] -= center[1]
+        
+        n_pts = len(coords) - 1
+        
+        # C. Set the base of the flat building shape to the ground_z value
+        points_2d = np.column_stack((coords[:-1], np.full(n_pts, ground_z)))
+        faces_2d = np.hstack([[n_pts], list(range(n_pts))])
+        
+        building_flat = pv.PolyData(points_2d, faces_2d)
+        
+        # D. Native Z-up extrusion (Height builds up cleanly from the sloped ground)
+        building_3d = building_flat.extrude((0, 0, height), capping=True)
+
+        color = generate_random_color()
+        building_3d['color'] = np.tile(color, (building_3d.n_points, 1))
+        instances_building.append(building_3d)
+
+    # Fast O(N) merge optimization
+    city_mesh = pv.merge(instances_building) if instances_building else pv.PolyData()
+    city_mesh = city_mesh.triangulate().compute_normals(auto_orient_normals=True)
+    return city_mesh, instances_building
+
+
+
+### CONSIDERING THE LOWEST ALTITUTE COORNER OF THE BUILDING ###
+
+def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transformer):
+    print("Extruding buildings with DEM data...")
+    instances_building = []
+
+    for footprint in footprints:
+        poly = footprint["geometry"]
+        height = footprint["height"]
+
+        # Find exterior coordinates of the building        
+        exterior_coords = list(poly.exterior.coords)
+        coords_altitude = []
+
+        for coord in exterior_coords:
+            get_altitude = get_elevation_at_point(
+            coord[0], coord[1], 
+            dem_src, geoid_src, to_4326_transformer
+        )
+            coords_altitude.append(get_altitude)
+        
+        ground_z = min(coords_altitude)
+
+        # Shift footprint coordinates to local center origin
+        coords = np.array(poly.exterior.coords)
+        coords[:, 0] -= center[0]
+        coords[:, 1] -= center[1]
+        
+        n_pts = len(coords) - 1
+        
+        # C. Set the base of the flat building shape to the ground_z value
+        points_2d = np.column_stack((coords[:-1], np.full(n_pts, ground_z)))
+        faces_2d = np.hstack([[n_pts], list(range(n_pts))])
+        
+        building_flat = pv.PolyData(points_2d, faces_2d)
+        
+        # D. Native Z-up extrusion (Height builds up cleanly from the sloped ground)
+        building_3d = building_flat.extrude((0, 0, height), capping=True)
+
+        color = generate_random_color()
+        building_3d['color'] = np.tile(color, (building_3d.n_points, 1))
+        instances_building.append(building_3d)
+
+    # Fast O(N) merge optimization
+    city_mesh = pv.merge(instances_building) if instances_building else pv.PolyData()
+    city_mesh = city_mesh.triangulate().compute_normals(auto_orient_normals=True)
+    return city_mesh, instances_building
+
+
+
+
+
+# CREATE TREES 
+# def create_tree_meshes(trees, center):
+#     print("Generating tree meshes...")
+#     instances_trees = []
+
+#     for _, row in trees.iterrows():
+#         geom = row.geometry
+#         if geom is None or geom.geom_type != "Point":
+#             continue
+
+#         x = geom.x - center[0]
+#         y = geom.y - center[1]
+#         z = 0  # Default ground level before DEM introduction
+
+#         # Trunk (Strictly Z-Up directional vector: 0, 0, 1)
+#         trunk = pv.Cylinder(
+#             center=(x, y, z + 1.0),
+#             direction=(0, 0, 1),
+#             radius=0.15,
+#             height=2.0,
+#             resolution=12
+#         )
+
+#         # Canopy
+#         canopy = pv.Sphere(
+#             radius=1.0,
+#             center=(x, y, z + 3.0),
+#             theta_resolution=12,
+#             phi_resolution=12
+#         )
+
+#         instances_trees.append(trunk.merge(canopy))
+
+#     tree_mesh = pv.merge(instances_trees) if instances_trees else pv.PolyData()
+#     return tree_mesh
+
+
+def create_tree_meshes(trees, center, dem_src, geoid_src, to_4326_transformer):
+    print("Generating tree meshes with DEM data...")
+    instances_trees = []
+
+    for _, row in trees.iterrows():
+        geom = row.geometry
+        if geom is None or geom.geom_type != "Point":
+            continue
+
+        # Get absolute ground level from DEM/Geoid mapping
+        ground_z = get_elevation_at_point(
+            geom.x, geom.y, 
+            dem_src, geoid_src, to_4326_transformer
+        )
+
+        # Shift to local origin
+        x = geom.x - center[0]
+        y = geom.y - center[1]
+
+        # Trunk (Base rests at ground_z)
+        trunk = pv.Cylinder(
+            center=(x, y, ground_z + 1.0),
+            direction=(0, 0, 1),
+            radius=0.15,
+            height=2.0,
+            resolution=12
+        )
+
+        # Canopy
+        canopy = pv.Sphere(
+            radius=1.0,
+            center=(x, y, ground_z + 3.0),
+            theta_resolution=12,
+            phi_resolution=12
+        )
+
+        instances_trees.append(trunk.merge(canopy))
+
+    tree_mesh = pv.merge(instances_trees) if instances_trees else pv.PolyData()
+    return tree_mesh
+
+
+# EXPORT FUNCTIONS 
+def save_to_obj(mesh, output_path):
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Saving model to {output_path}")
+    mesh.save(output_path)
+
+# def save_to_gltf(mesh, output_path):
+#     output_dir = Path(output_path).parent
+#     output_dir.mkdir(parents=True, exist_ok=True)
+
+#     mesh = mesh.triangulate().clean()
+#     faces = mesh.faces.reshape((-1, 4))[:, 1:]
+
+#     tm = trimesh.Trimesh(vertices=mesh.points, faces=faces, process=True)
+#     tm.visual.material = SimpleMaterial(diffuse=[200, 180, 160, 255])
+    
+#     tm.export(output_path)
+#     print(f"Saved GLB to {output_path}")
+
+# def save_to_gltf(mesh, output_path):
+#     output_dir = Path(output_path).parent
+#     output_dir.mkdir(parents=True, exist_ok=True)
+
+#     # 1. Clone the mesh so we don't modify the internal Z-up data
+#     export_mesh = mesh.copy()
+
+#     # 2. Fix the axis ONLY for glTF (Convert Z-up to Y-up for Cesium)
+#     export_mesh.rotate_x(-90, inplace=True)
+
+#     # 3. Clean and extract faces
+#     export_mesh = export_mesh.triangulate().clean()
+#     faces = export_mesh.faces.reshape((-1, 4))[:, 1:]
+
+#     # 4. Create trimesh object and export
+#     tm = trimesh.Trimesh(
+#         vertices=export_mesh.points,
+#         faces=faces,
+#         process=True
+#     )
+    
+#     material = SimpleMaterial(diffuse=[200, 180, 160, 255])
+#     tm.visual.material = material
+    
+#     tm.export(output_path)
+#     print(f"Saved correctly oriented GLB to {output_path}")
+
+
+def save_to_gltf(mesh, output_path):
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Clone the mesh and fix the axis for glTF (Z-up to Y-up)
+    export_mesh = mesh.copy()
+    export_mesh.rotate_x(-90, inplace=True)
+
+    # 2. Clean and force strict triangulation
+    export_mesh = export_mesh.triangulate().clean()
+    faces = export_mesh.faces.reshape((-1, 4))[:, 1:]
+
+    # 3. Create the trimesh object
+    tm = trimesh.Trimesh(
+        vertices=export_mesh.points,
+        faces=faces,
+        process=True
+    )
+
+    # 4. Define PBR material properties
+    material = SimpleMaterial(
+        diffuse=[220, 220, 220, 255],  # Clean light gray baseline
+        roughness=0.6,
+        metallic=0.1,
+    )
+    tm.visual.material = material
+
+    # 5. FIX THE HOLLOW LOOK: Force double-sided rendering in the glTF material definition
+    # This ensures both Cesium and Unreal Engine render the back-faces of polygons.
+    if hasattr(tm.visual.material, 'to_color'):
+        # Convert SimpleMaterial to a full PBR material assembly that supports glTF extras
+        tm.visual.material = tm.visual.material.to_pbr()
+    
+    # Inject the doubleSided flag into the glTF material structure
+    tm.visual.material.doubleSided = True
+    
+    # 6. Export GLB safely without the illegal kwargs
+    tm.export(output_path, include_normals=True)
+    print(f"Saved solid GLB to {output_path}")
+
+
+
+# --- MAIN EXECUTION ---
+#LOCATION 1
+location = "IST, Lisboa"
+#north, south, east, west = 38.738662, 38.734335, -9.133657, -9.141703
+
+north = 38.744000  # Safe inside 38.745217
+south = 38.736500  # Safe inside 38.736111 (Stops right before the map edge)
+east  = -9.134000  # Safe inside -9.133831
+west  = -9.141000  # Safe inside -9.145205
+
+#LOCATION 2
+
+
+#LOCATION 3
+
+
+# Converts epsg: 3763 back to lon lat to sample geoid
+transformer_to_4326 = Transformer.from_crs("EPSG:3763", "EPSG:4326", always_xy=True)
+
+# file paths of raster data
+base_dir = Path(__file__).parent
+
+dem_path = str(base_dir / "GeoData" / "MDT-50cm-112198-07-2024_v01.tiff")
+geoid_path = str(base_dir / "GeoData" / "egm2008-2.5.tif")
+
+#open raster files using rasterio
+dem_src = rasterio.open(dem_path)
+geoid_src = rasterio.open(geoid_path)
+
+
+buildings, trees, center = extract_osm_data_bbox(north, south, east, west)
+footprints = generate_footprints(buildings)
+
+#######################################################
+#ALTERAR AS FUNÇOES #
+mesh, bd_instances = extrude_buildings(footprints, center, dem_src, geoid_src, transformer_to_4326)
+tree_mesh = create_tree_meshes(trees, center, dem_src, geoid_src, transformer_to_4326)
+#######################################################
+
+
+dem_src.close()
+geoid_src.close()
+
+
+# IO Directories
+output_dir = "output/" + location.split(",")[0].replace(" ", "_")
+save_to_obj(mesh, f"{output_dir}/buildings.obj")
+save_to_obj(tree_mesh, f"{output_dir}/trees.obj")
+save_to_gltf(mesh, f"{output_dir}/buildings.glb")
+save_to_gltf(tree_mesh, f"{output_dir}/trees.glb")
+
+# Get Geo-location info
+transformer = Transformer.from_crs(buildings.crs, "EPSG:4326", always_xy=True)
+lon, lat = transformer.transform(center[0], center[1])
+print(f"\nInsert lat, lon in Cesium: {lat}, {lon}")
+
+# Plotting (Notice camera position defaults look great because data is cleanly structured Z-up)
+pl = pv.Plotter()
+pl.add_mesh(mesh, scalars=mesh['color'], rgb=True, show_edges=False)
+pl.add_mesh(tree_mesh, color="green")
+pl.show(title='3D Z-Up Test')
