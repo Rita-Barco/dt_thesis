@@ -1,12 +1,14 @@
 import osmnx as ox
 import numpy as np
 import pyvista as pv
-from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry import Polygon, MultiPolygon, box
 from pathlib import Path
 import random
 from pyproj import Transformer
 import trimesh
 from trimesh.visual.material import SimpleMaterial
+from rasterio.merge import merge
+from rasterio.io import MemoryFile
 import rasterio
 
 
@@ -31,6 +33,64 @@ def extract_osm_data_bbox(north, south, east, west):
     return buildings, trees, (center_x, center_y)
 
 
+# CHECK DEM FILES THAT CONTAIN SELECTED AREA
+
+def select_dem_files(north, south,west,east, dem_dir):
+
+    # transform selected bounding box to local projection
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3763", always_xy= True)
+    min_x, min_y = transformer.transform(west, south)
+    max_x, max_y = transformer.transform(east, north)
+    bbox_polygon = box(min_x, min_y, max_x, max_y)
+
+    # select intersecting dem files
+    intersecting_files = []
+    for path in Path(dem_dir).glob("*.tiff"):
+        src = rasterio.open(path)
+        print(f"\n--- Checking {path.name} ---")
+        print(f"DEM CRS: {src.crs}")
+        print(f"DEM Bounds: {src.bounds}")
+        print(f"BBOX (EPSG:3763): {bbox_polygon.bounds}")
+        dem_poly = box (src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top)
+
+        if bbox_polygon.intersects(dem_poly):
+            intersecting_files.append(src)
+        else:
+            src.close()
+
+    if not intersecting_files:
+        raise FileExistsError("No DEM files cover the selected bounding box!")
+
+
+    # merge selected dem files into a single array (easir to use, instead of iterating through all of them)
+    print(f"Merging {len(intersecting_files)} matching DEM tile(s)")
+    mosaic_array, out_transform = merge(intersecting_files)
+
+    # copy profile from the first tile and update dimensions and transform
+    #when merging multiple DEM files, raterio generates a new NumPY array representing the combined
+    #image -> now rasterio needes metadata to turn this raw NUmPy array back into a readable raster dataset
+
+    out_profile = intersecting_files[0].profile.copy()
+    out_profile.update({
+        "height": mosaic_array.shape[1],
+        "width": mosaic_array.shape[2],
+        "transform": out_transform
+    })
+
+    # close individual files
+    for src in intersecting_files:
+        src.close()
+
+
+    # in memory virtual dataset (MemoryFile)
+    memfile = MemoryFile()
+    merged_src = memfile.open(**out_profile)
+    merged_src.write(mosaic_array)
+
+    return memfile, merged_src
+
+
+    
 # GENERATE FOOTPRINTS
 def parse_height(value):
     if not value:
@@ -66,8 +126,7 @@ def generate_footprints(buildings):
 
     return footprints
 
-
-# EXTRUDE BUILDINGS 
+ 
 def generate_random_color():
     return [random.random() for _ in range(3)]
 
@@ -182,9 +241,6 @@ def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transforme
     return city_mesh, instances_building
 
 
-
-
-
 # CREATE TREES 
 # def create_tree_meshes(trees, center):
 #     print("Generating tree meshes...")
@@ -271,47 +327,6 @@ def save_to_obj(mesh, output_path):
     print(f"Saving model to {output_path}")
     mesh.save(output_path)
 
-# def save_to_gltf(mesh, output_path):
-#     output_dir = Path(output_path).parent
-#     output_dir.mkdir(parents=True, exist_ok=True)
-
-#     mesh = mesh.triangulate().clean()
-#     faces = mesh.faces.reshape((-1, 4))[:, 1:]
-
-#     tm = trimesh.Trimesh(vertices=mesh.points, faces=faces, process=True)
-#     tm.visual.material = SimpleMaterial(diffuse=[200, 180, 160, 255])
-    
-#     tm.export(output_path)
-#     print(f"Saved GLB to {output_path}")
-
-# def save_to_gltf(mesh, output_path):
-#     output_dir = Path(output_path).parent
-#     output_dir.mkdir(parents=True, exist_ok=True)
-
-#     # 1. Clone the mesh so we don't modify the internal Z-up data
-#     export_mesh = mesh.copy()
-
-#     # 2. Fix the axis ONLY for glTF (Convert Z-up to Y-up for Cesium)
-#     export_mesh.rotate_x(-90, inplace=True)
-
-#     # 3. Clean and extract faces
-#     export_mesh = export_mesh.triangulate().clean()
-#     faces = export_mesh.faces.reshape((-1, 4))[:, 1:]
-
-#     # 4. Create trimesh object and export
-#     tm = trimesh.Trimesh(
-#         vertices=export_mesh.points,
-#         faces=faces,
-#         process=True
-#     )
-    
-#     material = SimpleMaterial(diffuse=[200, 180, 160, 255])
-#     tm.visual.material = material
-    
-#     tm.export(output_path)
-#     print(f"Saved correctly oriented GLB to {output_path}")
-
-
 def save_to_gltf(mesh, output_path):
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -353,16 +368,15 @@ def save_to_gltf(mesh, output_path):
     print(f"Saved solid GLB to {output_path}")
 
 
-
 # --- MAIN EXECUTION ---
 #LOCATION 1
 location = "IST, Lisboa"
 #north, south, east, west = 38.738662, 38.734335, -9.133657, -9.141703
 
-north = 38.744000  # Safe inside 38.745217
-south = 38.736500  # Safe inside 38.736111 (Stops right before the map edge)
-east  = -9.134000  # Safe inside -9.133831
-west  = -9.141000  # Safe inside -9.145205
+north = 38.73892 
+south = 38.73430  
+east  = -9.13548  
+west  = -9.14243 
 
 #LOCATION 2
 
@@ -390,14 +404,14 @@ transformer_to_4326 = Transformer.from_crs("EPSG:3763", "EPSG:4326", always_xy=T
 
 # file paths of raster data
 base_dir = Path(__file__).parent
+geo_data_dir = base_dir/ "GeoData" / "DEM_Files"
 
-dem_path = str(base_dir / "GeoData" / "MDT-50cm-112198-07-2024_v01.tiff")
 geoid_path = str(base_dir / "GeoData" / "egm2008-2.5.tif")
 
 #open raster files using rasterio
-dem_src = rasterio.open(dem_path)
 geoid_src = rasterio.open(geoid_path)
 
+dem_memfile, dem_src = select_dem_files(north, south, east, west, geo_data_dir)
 
 buildings, trees, center = extract_osm_data_bbox(north, south, east, west)
 footprints = generate_footprints(buildings)
@@ -410,6 +424,7 @@ tree_mesh = create_tree_meshes(trees, center, dem_src, geoid_src, transformer_to
 
 
 dem_src.close()
+dem_memfile.close()
 geoid_src.close()
 
 
