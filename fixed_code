@@ -86,46 +86,8 @@ def get_elevation_at_point(x_3763, y_3763, dem_map, geoid_map, to_4326_transform
     return alt_orthometric + alt_geoid
     
 
-# def extrude_buildings(footprints, center):
-#     print("Extruding buildings...")
-#     instances_building = []
 
-#     for footprint in footprints:
-#         poly = footprint["geometry"]
-#         height = footprint["height"]
-
-#         # 1. Get exterior coordinates and center them
-#         coords = np.array(poly.exterior.coords)
-#         coords[:, 0] -= center[0]
-#         coords[:, 1] -= center[1]
-        
-#         # 2. Create 2D flat face in PyVista (Z=0)
-#         # PyVista wants a face array padding format: [num_points, id0, id1, ...]
-#         n_pts = len(coords) - 1 # drop duplicate last point
-#         points_2d = np.column_stack((coords[:-1], np.zeros(n_pts)))
-#         faces_2d = np.hstack([[n_pts], list(range(n_pts))])
-        
-#         building_flat = pv.PolyData(points_2d, faces_2d)
-        
-#         # 3. Native, watertight extrusion along the Z axis (STAYING Z-UP!)
-#         building_3d = building_flat.extrude((0, 0, height), capping=True)
-
-#         # Apply random color per building
-#         color = generate_random_color()
-#         building_3d['color'] = np.tile(color, (building_3d.n_points, 1))
-        
-#         instances_building.append(building_3d)
-
-#     # Fast O(N) merge instead of continuous loop merging
-#     print("Merging building meshes...")
-#     city_mesh = pv.merge(instances_building) if instances_building else pv.PolyData()
-    
-#     city_mesh = city_mesh.triangulate()
-#     city_mesh = city_mesh.compute_normals(auto_orient_normals=True)
-
-#     print("Building extrusion complete")
-#     return city_mesh, instances_building
-
+### CONSIDERING THE ALTITUDE OF THE CENTROID OF THE BUILDING ###
 
 # def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transformer):
 #     print("Extruding buildings with DEM data...")
@@ -137,7 +99,7 @@ def get_elevation_at_point(x_3763, y_3763, dem_map, geoid_map, to_4326_transform
 
 #         # A. Find the absolute map coordinates of the building's center
 #         abs_centroid = poly.centroid
-        
+         
 #         # B. Use the teacher's logic to pull the true ground height
 #         ground_z = get_elevation_at_point(
 #             abs_centroid.x, abs_centroid.y, 
@@ -168,52 +130,6 @@ def get_elevation_at_point(x_3763, y_3763, dem_map, geoid_map, to_4326_transform
 #     city_mesh = pv.merge(instances_building) if instances_building else pv.PolyData()
 #     city_mesh = city_mesh.triangulate().compute_normals(auto_orient_normals=True)
 #     return city_mesh, instances_building
-
-
-
-### CONSIDERING THE ALTITUDE OF THE CENTROID OF THE BUILDING ###
-
-def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transformer):
-    print("Extruding buildings with DEM data...")
-    instances_building = []
-
-    for footprint in footprints:
-        poly = footprint["geometry"]
-        height = footprint["height"]
-
-        # A. Find the absolute map coordinates of the building's center
-        abs_centroid = poly.centroid
-         
-        # B. Use the teacher's logic to pull the true ground height
-        ground_z = get_elevation_at_point(
-            abs_centroid.x, abs_centroid.y, 
-            dem_src, geoid_src, to_4326_transformer
-        )
-
-        # Shift footprint coordinates to local center origin
-        coords = np.array(poly.exterior.coords)
-        coords[:, 0] -= center[0]
-        coords[:, 1] -= center[1]
-        
-        n_pts = len(coords) - 1
-        
-        # C. Set the base of the flat building shape to the ground_z value
-        points_2d = np.column_stack((coords[:-1], np.full(n_pts, ground_z)))
-        faces_2d = np.hstack([[n_pts], list(range(n_pts))])
-        
-        building_flat = pv.PolyData(points_2d, faces_2d)
-        
-        # D. Native Z-up extrusion (Height builds up cleanly from the sloped ground)
-        building_3d = building_flat.extrude((0, 0, height), capping=True)
-
-        color = generate_random_color()
-        building_3d['color'] = np.tile(color, (building_3d.n_points, 1))
-        instances_building.append(building_3d)
-
-    # Fast O(N) merge optimization
-    city_mesh = pv.merge(instances_building) if instances_building else pv.PolyData()
-    city_mesh = city_mesh.triangulate().compute_normals(auto_orient_normals=True)
-    return city_mesh, instances_building
 
 
 
@@ -450,8 +366,23 @@ west  = -9.141000  # Safe inside -9.145205
 
 #LOCATION 2
 
+#Porção do parque florestal de Monsanto
+# location = "Parque florestal de Monsanto, Lisboa"
+
+# north = 38.74265
+# south = 38.73313
+# east  = -9.18249
+# west  = -9.20163
 
 #LOCATION 3
+
+#Academia Militar 
+# location = "Academia Militar, Amadora"
+
+# north = 38.756928
+# south = 38.748277
+# east  = -9.239877
+# west  = -9.243364
 
 
 # Converts epsg: 3763 back to lon lat to sample geoid
