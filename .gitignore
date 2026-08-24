@@ -2,6 +2,7 @@
 *.osm.pbf
 *.tif
 *.tiff
+*.part
 
 # Large 3D/generated files
 *.obj
