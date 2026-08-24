@@ -35,7 +35,7 @@ def extract_osm_data_bbox(north, south, east, west):
 
 # CHECK DEM FILES THAT CONTAIN SELECTED AREA
 
-def select_dem_files(north, south,west,east, dem_dir):
+def select_dem_files(north, south,west,east, dem_dir, output_dem_path):
 
     # transform selected bounding box to local projection
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:3763", always_xy= True)
@@ -81,13 +81,26 @@ def select_dem_files(north, south,west,east, dem_dir):
     for src in intersecting_files:
         src.close()
 
+    output_path = Path(output_dem_path)
+    output_path.parent.mkdir(parents=True, exist_ok= True)
 
-    # in memory virtual dataset (MemoryFile)
-    memfile = MemoryFile()
-    merged_src = memfile.open(**out_profile)
-    merged_src.write(mosaic_array)
+    with rasterio.open(output_path, "w", **out_profile) as dst: 
+        dst.write(mosaic_array)
 
-    return memfile, merged_src
+    print(f"Saved merged DEM to {output_path}")
+
+    dem_src = rasterio.open(output_path)
+
+    return dem_src
+
+
+
+    # # code to save in memory virtual dataset (MemoryFile)
+    # memfile = MemoryFile()
+    # merged_src = memfile.open(**out_profile)
+    # merged_src.write(mosaic_array)
+
+    # return memfile, merged_src
 
 
     
@@ -405,13 +418,18 @@ transformer_to_4326 = Transformer.from_crs("EPSG:3763", "EPSG:4326", always_xy=T
 # file paths of raster data
 base_dir = Path(__file__).parent
 geo_data_dir = base_dir/ "GeoData" / "DEM_Files"
+output_dir = "output/" + location.split(",")[0].replace(" ", "_")
 
 geoid_path = str(base_dir / "GeoData" / "egm2008-2.5.tif")
 
 #open raster files using rasterio
 geoid_src = rasterio.open(geoid_path)
 
-dem_memfile, dem_src = select_dem_files(north, south, east, west, geo_data_dir)
+merged_dem_file = f"{output_dir}/merged_terrain.tif"
+dem_src = select_dem_files(north, south, east, west, geo_data_dir, merged_dem_file)
+
+#dem_memfile, dem_src = select_dem_files(north, south, east, west, geo_data_dir)
+
 
 buildings, trees, center = extract_osm_data_bbox(north, south, east, west)
 footprints = generate_footprints(buildings)
@@ -424,7 +442,8 @@ tree_mesh = create_tree_meshes(trees, center, dem_src, geoid_src, transformer_to
 
 
 dem_src.close()
-dem_memfile.close()
+# use when considering only memory file of the DEM model
+#dem_memfile.close()
 geoid_src.close()
 
 
