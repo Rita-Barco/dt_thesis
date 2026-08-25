@@ -147,6 +147,12 @@ def generate_random_color():
 def get_elevation_at_point(x_3763, y_3763, dem_map, geoid_map, to_4326_transformer):
     # Obtain orthometric altitude using local projected coordinates (x, y)
     alt_orthometric = next(dem_map.sample([(x_3763, y_3763)]))[0]
+
+    # 2. Check for NoData (-9999 or extremely low values)
+    # Raster files usually define a specific nodata value, but < -500 is a safe catch-all
+    if alt_orthometric == dem_map.nodata or alt_orthometric < -500:
+        print(f"Warning: NoData hit at {x_3763}, {y_3763}")
+        return float('inf') # Forces min() to ignore this vertex
     
     # Convert EPSG:3763 back to LLA (Lon, Lat) to sample the Geoid map
     lon, lat = to_4326_transformer.transform(x_3763, y_3763)
