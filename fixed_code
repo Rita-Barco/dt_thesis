@@ -259,44 +259,6 @@ def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transforme
     city_mesh = city_mesh.triangulate().compute_normals(auto_orient_normals=True)
     return city_mesh, instances_building
 
-
-# CREATE TREES 
-# def create_tree_meshes(trees, center):
-#     print("Generating tree meshes...")
-#     instances_trees = []
-
-#     for _, row in trees.iterrows():
-#         geom = row.geometry
-#         if geom is None or geom.geom_type != "Point":
-#             continue
-
-#         x = geom.x - center[0]
-#         y = geom.y - center[1]
-#         z = 0  # Default ground level before DEM introduction
-
-#         # Trunk (Strictly Z-Up directional vector: 0, 0, 1)
-#         trunk = pv.Cylinder(
-#             center=(x, y, z + 1.0),
-#             direction=(0, 0, 1),
-#             radius=0.15,
-#             height=2.0,
-#             resolution=12
-#         )
-
-#         # Canopy
-#         canopy = pv.Sphere(
-#             radius=1.0,
-#             center=(x, y, z + 3.0),
-#             theta_resolution=12,
-#             phi_resolution=12
-#         )
-
-#         instances_trees.append(trunk.merge(canopy))
-
-#     tree_mesh = pv.merge(instances_trees) if instances_trees else pv.PolyData()
-#     return tree_mesh
-
-
 def create_tree_meshes(trees, center, dem_src, geoid_src, to_4326_transformer):
     print("Generating tree meshes with DEM data...")
     instances_trees = []
