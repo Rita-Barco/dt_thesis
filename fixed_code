@@ -21,7 +21,7 @@ def extract_osm_data_bbox(north, south, east, west):
     The data is reprojected from WGS84 (degrees) to EPSG:3763 (meters)
     to allow for a correct and accurate physical extrusion of a 3D model.
     
-    Inputs:
+    Parameters:
     - north (float): Northern latitude of the bounding box
     - south (float): Southern latitude of the bounding box
     - east (float): Eastern longitude of the bounding box
@@ -68,15 +68,32 @@ def extract_osm_data_bbox(north, south, east, west):
     return buildings, trees, (center_x, center_y)
 
 
-def select_dem_files(north, south,west,east, dem_dir, output_dem_path):
+def select_dem_files(north, south, west, east, dem_dir, output_dem_path):
+    """
+    Identifies, clips and merges DEM tiles that intersect the selected geographic
+    bounding box to create a continuous elevation surface
 
-    # transform selected bounding box to local projection
+    Parameters:
+    - north (float): Northern latitude of the bounding box
+    - south (float): Southern latitude of the bounding box
+    - west (float): Western longitude of the bounding box
+    - east (float): Eastern longitude of the bounding box
+    - dem_dir (str or Path): Directory containing the source DEM .tiff files
+    - output_dem_path (str or Path): File path to save the merged DEM files raster
+
+    Returns:
+    - dem_src (rasterio.DatasetReader): OPnened rasterio dataset of the merged DEM files 
+    used downstream to query elevation data for placing buildings and trees
+
+    """
+
+    # Transform selected bounding box to local projection 
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:3763", always_xy= True)
     min_x, min_y = transformer.transform(west, south)
     max_x, max_y = transformer.transform(east, north)
     bbox_polygon = box(min_x, min_y, max_x, max_y)
 
-    # select intersecting dem files
+    # Select intersecting DEM files
     intersecting_files = []
     for path in Path(dem_dir).glob("*.tiff"):
         src = rasterio.open(path)
@@ -84,25 +101,26 @@ def select_dem_files(north, south,west,east, dem_dir, output_dem_path):
         print(f"DEM CRS: {src.crs}")
         print(f"DEM Bounds: {src.bounds}")
         print(f"BBOX (EPSG:3763): {bbox_polygon.bounds}")
+
+        # Create bounding box geometry for the current DEM tile
         dem_poly = box (src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top)
 
         if bbox_polygon.intersects(dem_poly):
             intersecting_files.append(src)
         else:
-            src.close()
+            src.close() # Free up memory for unused rasters
 
     if not intersecting_files:
-        raise FileExistsError("No DEM files cover the selected bounding box!")
+        raise FileExistsError("No DEM files cover the selected bounding box")
 
 
-    # merge selected dem files into a single array (easir to use, instead of iterating through all of them)
+    # Merge selected DEM files into a single array (easier to use, instead of iterating through all of them)
     print(f"Merging {len(intersecting_files)} matching DEM tile(s)")
     mosaic_array, out_transform = merge(intersecting_files)
 
-    # copy profile from the first tile and update dimensions and transform
-    #when merging multiple DEM files, raterio generates a new NumPY array representing the combined
-    #image -> now rasterio needes metadata to turn this raw NUmPy array back into a readable raster dataset
-
+    # Copy spatial profile (metadata) from the first tile to apply to the merged array
+    # Rasterio's merge function outputs a raw NumPy array (no spatial reference)
+    # The metadata is updated to restore its real-world coordinates and dimensions
     out_profile = intersecting_files[0].profile.copy()
     out_profile.update({
         "height": mosaic_array.shape[1],
@@ -110,10 +128,11 @@ def select_dem_files(north, south,west,east, dem_dir, output_dem_path):
         "transform": out_transform
     })
 
-    # close individual files
+    # Close individual source files
     for src in intersecting_files:
         src.close()
 
+    # Save merged DEM to disk
     output_path = Path(output_dem_path)
     output_path.parent.mkdir(parents=True, exist_ok= True)
 
@@ -122,10 +141,10 @@ def select_dem_files(north, south,west,east, dem_dir, output_dem_path):
 
     print(f"Saved merged DEM to {output_path}")
 
+    # Re-open the saved file to return a standard rasterio DatasetReader object
     dem_src = rasterio.open(output_path)
 
     return dem_src
-
 
 
     # # code to save in memory virtual dataset (MemoryFile)
@@ -174,6 +193,13 @@ def generate_footprints(buildings):
 
  
 def generate_random_color():
+    """
+    Generates a random normalized RGB color array.
+    Provides a radom color to help visually distinguish individual building 
+    volumes when previewing the 3D meshes locally using PyVista.
+    Returns:
+        list of float: A 3-element list [R, G, B] with values between 0.0 and 1.0.
+    """
     return [random.random() for _ in range(3)]
 
 
