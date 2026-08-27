@@ -14,26 +14,59 @@ import rasterio
 
 # EXTRACT DATA
 def extract_osm_data_bbox(north, south, east, west):
+    """
+    Downloads building and tree footprint geometries from OpenStreetMAp
+    for a specified bounding box and prepares them for 3D processing.
+    
+    The data is reprojected from WGS84 (degrees) to EPSG:3763 (meters)
+    to allow for a correct and accurate physical extrusion of a 3D model.
+    
+    Inputs:
+    - north (float): Northern latitude of the bounding box
+    - south (float): Southern latitude of the bounding box
+    - east (float): Eastern longitude of the bounding box
+    - west (float): Western longitude of the bounding box
+
+    Returns:
+    - buildings (GeoDataFrame)
+    - trees (GeoDataFrame)
+    - (center_x, center_y) (tuple of floats): coordinates in meteres, used to
+        specify the region's origin for accurate placement in Cesium Ion
+    """
+
+    # Bounding box parameters
     bbox = [west, south, east, north]
     print("Downloading OSM data for bounding box...")
 
+    # Query OSM for specific map features within the bounding box
+
+    # Extract all building topologies (residential, commercial, etc)
     buildings = ox.features_from_bbox(bbox, tags={'building': True})
+
+    # Extract individual tree nodes/polygons
     trees = ox.features_from_bbox(bbox, tags={'natural': 'tree'})
 
-    # Project to local CRS
+    # Project to local CRS (ESPG:3763 -> PT-TM06 / ETRS89 - Portugal's local coordinate system)
+    # OSM data defaults to WGS84 (EPSG:4326), which uses degrees.
+    # To extrude buildings in meters without distortion in 3D generation, the data is
+    #projected to a metric coordinate system.
     buildings = ox.projection.project_gdf(buildings, to_crs="3763")
     trees = ox.projection.project_gdf(trees, to_crs="3763")
 
     print(f"Downloaded {len(buildings)} buildings and {len(trees)} trees.")
 
     minx, miny, maxx, maxy = buildings.total_bounds
+
+    # Calculate geographic center based on the actual downloaded geometries
+    # The extracted dataset center differs from the geographic center of the bounding
+    # box used as input (we calculate this center after projecting to avoid non-linear 
+    # distortion inherent in LAT/LON coordinates)
+
     center_x = (minx + maxx) / 2
     center_y = (miny + maxy) / 2
 
     return buildings, trees, (center_x, center_y)
 
-
-# CHECK DEM FILES THAT CONTAIN SELECTED AREA
 
 def select_dem_files(north, south,west,east, dem_dir, output_dem_path):
 
