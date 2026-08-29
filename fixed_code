@@ -156,33 +156,69 @@ def select_dem_files(north, south, west, east, dem_dir, output_dem_path):
 
 
     
-# GENERATE FOOTPRINTS
 def parse_height(value):
+    """
+    Cleans and converts raw OSM height tags into usable numeric values
+
+    Parameters:
+    - value (str or numeric): Raw value from the OSM "height" tag
+
+    Returns:
+    - float: Parsed height in meters 
+    - none: If the value is empty, invalid or cannot be parsed
+    """
+
     if not value:
         return None
     try:
+        # OSM users type units like "12m" or multiple heights like "10;15"
+        # This removes the "m" and selects only the first number
         return float(str(value).replace("m", "").split(";")[0])
     except:
         return None
 
 def is_missing(value):
+    """
+    Checks if a dataframe value is empty
+
+    Returns:
+    - bool: true if the value is None or NaN
+    """
     return value is None or (isinstance(value, float) and np.isnan(value))
 
 def generate_footprints(buildings):
+    """
+    Extracts polygons and assigns a final height to every building
+
+    Parameters:
+    - buildings (GeoDataFrame): downloaded building geometries
+
+    Returns:
+    - list of dict: a list containing individual polygons and their heights    
+    """
+
     footprints = []
     for _, row in buildings.iterrows():
         geom = row.geometry
         height = parse_height(row.get('height'))
         levels = parse_height(row.get('building:levels'))
 
+        # many OSM buildings lack a "height" tag, but have the number of levels
+        # the height is estimated by assuming a standard 3 meters per floor
+
         if is_missing(height) and not is_missing(levels):
             height = levels * 3 
+
+        # if no height data exists, a random realistic number is assigned
         if is_missing(height):
             height = random.uniform(3, 12) # Kept fallback realistic
 
         def add_poly(poly):
             footprints.append({"geometry": poly, "height": height})
 
+        # 3D extrusion tools typically require single and continuous polygons
+        # if a building is a MultiPolygon, it is separated into individual polygons
+        # before saving
         if isinstance(geom, MultiPolygon):
             for poly in geom.geoms:
                 add_poly(poly)
@@ -198,22 +234,36 @@ def generate_random_color():
     Provides a radom color to help visually distinguish individual building 
     volumes when previewing the 3D meshes locally using PyVista.
     Returns:
-        list of float: A 3-element list [R, G, B] with values between 0.0 and 1.0.
+        list of float: 3-element list [R, G, B] with values between 0.0 and 1
     """
     return [random.random() for _ in range(3)]
 
 
 def get_elevation_at_point(x_3763, y_3763, dem_map, geoid_map, to_4326_transformer):
-    # Obtain orthometric altitude using local projected coordinates (x, y)
+    """
+    Calculates the final elevatioon for a specific point combining DEM and Geoid data
+
+    Parameters:
+    - x_3763, y_3763: point coordinates in meters (EPSG:3763)
+    - dem_map: local DEM raster (height above sea level)
+    - geoid_map: geoid raster (geoid undulation)
+    - to_4326_transformer: transformer to convert meters to Lat/Lon
+
+    Returns:
+    - float: the final ellipsoidal elevation in meters or infinity if invalid
+    
+    """
+
+    # Obtain orthometric altitude (height above mean sea level) using local projected coordinates (x, y)
     alt_orthometric = next(dem_map.sample([(x_3763, y_3763)]))[0]
 
-    # 2. Check for NoData (-9999 or extremely low values)
+    # Check for NoData (-9999 or extremely low values)
     # Raster files usually define a specific nodata value, but < -500 is a safe catch-all
     if alt_orthometric == dem_map.nodata or alt_orthometric < -500:
         print(f"Warning: NoData hit at {x_3763}, {y_3763}")
         return float('inf') # Forces min() to ignore this vertex
     
-    # Convert EPSG:3763 back to LLA (Lon, Lat) to sample the Geoid map
+    # Convert EPSG:3763 back to (Lon, Lat) to sample the Geoid map
     lon, lat = to_4326_transformer.transform(x_3763, y_3763)
     
     # Obtain geoid altitude using global coordinates (lon, lat)
@@ -273,6 +323,18 @@ def get_elevation_at_point(x_3763, y_3763, dem_map, geoid_map, to_4326_transform
 ### CONSIDERING THE LOWEST ALTITUTE COORNER OF THE BUILDING ###
 
 def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transformer):
+    """
+    Converts 2D building footprints into 3D meshes placed on the terrain surface
+
+    Parameters:
+    - footprints (list of dict): building geometries and their target height
+    - center (tuple): local (x, y) origin to center the mesh around
+    - dem_src, geoid_src, to_4326_transformer: data needed to sample terrain elevation
+    
+    Returns: 
+    - city_mesh (pyvista.PolyData): single merged 3D mesh of all buildings
+    - instances_building (list): individual builiding meshes (for debugging)
+    """
     print("Extruding buildings with DEM data...")
     instances_building = []
 
@@ -290,7 +352,8 @@ def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transforme
             dem_src, geoid_src, to_4326_transformer
         )
             coords_altitude.append(get_altitude)
-        
+
+        # Anchor the base of the builidng to the lowest elevation point
         ground_z = min(coords_altitude)
 
         # Shift footprint coordinates to local center origin
@@ -300,13 +363,13 @@ def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transforme
         
         n_pts = len(coords) - 1
         
-        # C. Set the base of the flat building shape to the ground_z value
+        # Set the base of the flat building shape to the ground_z value
         points_2d = np.column_stack((coords[:-1], np.full(n_pts, ground_z)))
         faces_2d = np.hstack([[n_pts], list(range(n_pts))])
         
         building_flat = pv.PolyData(points_2d, faces_2d)
         
-        # D. Native Z-up extrusion (Height builds up cleanly from the sloped ground)
+        # Native Z-up extrusion (Height builds up cleanly from the sloped ground)
         building_3d = building_flat.extrude((0, 0, height), capping=True)
 
         color = generate_random_color()
@@ -319,6 +382,18 @@ def extrude_buildings(footprints, center, dem_src, geoid_src, to_4326_transforme
     return city_mesh, instances_building
 
 def create_tree_meshes(trees, center, dem_src, geoid_src, to_4326_transformer):
+    """
+    Procedurally generates 3D tree models from OSM point data
+
+    Parameters:
+    - trees (GeoDataFrame): downloaded OSM tree geometries
+    - center (tuple): local (x, y) origin to center the mesh around
+    - dem_src, geoid_src, to_4326_transformer: data needed to sample terrain elevation
+
+    Returns: 
+    - tree_mesh (pyvista.PolyData): a single merged 3D mesh of all generated trees
+    """
+
     print("Generating tree meshes with DEM data...")
     instances_trees = []
 
@@ -337,7 +412,9 @@ def create_tree_meshes(trees, center, dem_src, geoid_src, to_4326_transformer):
         x = geom.x - center[0]
         y = geom.y - center[1]
 
-        # Trunk (Base rests at ground_z)
+        # Trunk (base rests at ground_z)
+        # PyVista places shapes by their center, to make a 2m trunk sit 
+        # flat on the ground, its center point must be exactly 1m up
         trunk = pv.Cylinder(
             center=(x, y, ground_z + 1.0),
             direction=(0, 0, 1),
@@ -346,7 +423,7 @@ def create_tree_meshes(trees, center, dem_src, geoid_src, to_4326_transformer):
             resolution=12
         )
 
-        # Canopy
+        # Canopy (places the leaves right at the top of the 2m  trunk)
         canopy = pv.Sphere(
             radius=1.0,
             center=(x, y, ground_z + 3.0),
