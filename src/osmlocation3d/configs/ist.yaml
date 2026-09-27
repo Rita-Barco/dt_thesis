@@ -1,0 +1,16 @@
+location:
+  name: "IST, Lisboa"
+
+bounding_box:
+  north: 38.73892
+  south: 38.73430
+  east: -9.13548
+  west: -9.14243
+
+projection:
+  epsg: 3763
+
+paths:
+  dem_dir: "GeoData/DEM_Files"
+  geoid_path: "GeoData/egm2008-2.5.tif"
+  output_dir: "output/IST"

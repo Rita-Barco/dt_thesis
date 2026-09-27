@@ -1,3 +1,4 @@
+import argparse
 import osmnx as ox
 import numpy as np
 import pyvista as pv
@@ -10,6 +11,27 @@ from trimesh.visual.material import SimpleMaterial
 from rasterio.merge import merge
 from rasterio.io import MemoryFile
 import rasterio
+import yaml
+
+
+def load_config(config_path: str | Path):
+    """
+    Loads the project configuration from a YAML file.
+
+    The configuration stores user-editable values such as the study area,
+    map projection, and file paths for the DEM and geoid data.
+    """
+    config_file = Path(config_path)
+    if not config_file.exists():
+        raise FileNotFoundError(f"Configuration file not found: {config_file}")
+
+    with config_file.open("r", encoding="utf-8") as fh:
+        config = yaml.safe_load(fh) or {}
+
+    if not isinstance(config, dict):
+        raise TypeError("Configuration file must contain a YAML dictionary at the root")
+
+    return config
 
 
 # EXTRACT DATA
@@ -485,86 +507,67 @@ def save_to_gltf(mesh, output_path):
     print(f"Saved solid GLB to {output_path}")
 
 
-# --- MAIN EXECUTION ---
-#LOCATION 1
-location = "IST, Lisboa"
-#north, south, east, west = 38.738662, 38.734335, -9.133657, -9.141703
+def main():
+    parser = argparse.ArgumentParser(description="Generate 3D meshes from OSM and DEM data.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="Path to a YAML configuration file.",
+    )
+    args = parser.parse_args()
 
-north = 38.73892 
-south = 38.73430  
-east  = -9.13548  
-west  = -9.14243 
+    project_root = Path(__file__).resolve().parents[2]
+    config = load_config(args.config)
 
-#LOCATION 2
+    location = config["location"]["name"]
 
-#Porção do parque florestal de Monsanto
-# location = "Parque florestal de Monsanto, Lisboa"
+    north = config["bounding_box"]["north"]
+    south = config["bounding_box"]["south"]
+    east = config["bounding_box"]["east"]
+    west = config["bounding_box"]["west"]
 
-# north = 38.74265
-# south = 38.73313
-# east  = -9.18249
-# west  = -9.20163
+    projection_epsg = config["projection"].get("epsg", 3763)
+    if projection_epsg != 3763:
+        raise ValueError(f"This project is configured for EPSG:3763. Received EPSG:{projection_epsg}.")
 
-#LOCATION 3
+    geo_data_dir = project_root / config["paths"]["dem_dir"]
+    output_dir_cfg = config["paths"].get("output_dir", f"output/{location.split(',')[0].replace(' ', '_')}")
+    output_dir = Path(output_dir_cfg) if Path(output_dir_cfg).is_absolute() else project_root / output_dir_cfg
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-#Academia Militar 
-# location = "Academia Militar, Amadora"
+    geoid_path_cfg = config["paths"]["geoid_path"]
+    geoid_path = Path(geoid_path_cfg) if Path(geoid_path_cfg).is_absolute() else project_root / geoid_path_cfg
 
-# north = 38.756928
-# south = 38.748277
-# east  = -9.239877
-# west  = -9.243364
+    transformer_to_4326 = Transformer.from_crs(f"EPSG:{projection_epsg}", "EPSG:4326", always_xy=True)
 
+    geoid_src = rasterio.open(str(geoid_path))
+    merged_dem_file = output_dir / "merged_terrain.tif"
+    dem_src = select_dem_files(north, south, east, west, geo_data_dir, str(merged_dem_file))
 
-# Converts epsg: 3763 back to lon lat to sample geoid
-transformer_to_4326 = Transformer.from_crs("EPSG:3763", "EPSG:4326", always_xy=True)
+    buildings, trees, center = extract_osm_data_bbox(north, south, east, west)
+    footprints = generate_footprints(buildings)
 
-# file paths of raster data
-base_dir = Path(__file__).parent
-geo_data_dir = base_dir/ "GeoData" / "DEM_Files"
-output_dir = "output/" + location.split(",")[0].replace(" ", "_")
+    mesh, bd_instances = extrude_buildings(footprints, center, dem_src, geoid_src, transformer_to_4326)
+    tree_mesh = create_tree_meshes(trees, center, dem_src, geoid_src, transformer_to_4326)
 
-geoid_path = str(base_dir / "GeoData" / "egm2008-2.5.tif")
+    dem_src.close()
+    geoid_src.close()
 
-#open raster files using rasterio
-geoid_src = rasterio.open(geoid_path)
+    save_to_obj(mesh, str(output_dir / "buildings.obj"))
+    save_to_obj(tree_mesh, str(output_dir / "trees.obj"))
+    save_to_gltf(mesh, str(output_dir / "buildings.glb"))
+    save_to_gltf(tree_mesh, str(output_dir / "trees.glb"))
 
-merged_dem_file = f"{output_dir}/merged_terrain.tif"
-dem_src = select_dem_files(north, south, east, west, geo_data_dir, merged_dem_file)
+    transformer = Transformer.from_crs(buildings.crs, "EPSG:4326", always_xy=True)
+    lon, lat = transformer.transform(center[0], center[1])
+    print(f"\nInsert lat, lon in Cesium: {lat}, {lon}")
 
-#dem_memfile, dem_src = select_dem_files(north, south, east, west, geo_data_dir)
-
-
-buildings, trees, center = extract_osm_data_bbox(north, south, east, west)
-footprints = generate_footprints(buildings)
-
-#######################################################
-#ALTERAR AS FUNÇOES #
-mesh, bd_instances = extrude_buildings(footprints, center, dem_src, geoid_src, transformer_to_4326)
-tree_mesh = create_tree_meshes(trees, center, dem_src, geoid_src, transformer_to_4326)
-#######################################################
-
-
-dem_src.close()
-# use when considering only memory file of the DEM model
-#dem_memfile.close()
-geoid_src.close()
+    pl = pv.Plotter()
+    pl.add_mesh(mesh, scalars=mesh['color'], rgb=True, show_edges=False)
+    pl.add_mesh(tree_mesh, color="green")
+    pl.show(title='3D Z-Up Test')
 
 
-# IO Directories
-output_dir = "output/" + location.split(",")[0].replace(" ", "_")
-save_to_obj(mesh, f"{output_dir}/buildings.obj")
-save_to_obj(tree_mesh, f"{output_dir}/trees.obj")
-save_to_gltf(mesh, f"{output_dir}/buildings.glb")
-save_to_gltf(tree_mesh, f"{output_dir}/trees.glb")
-
-# Get Geo-location info
-transformer = Transformer.from_crs(buildings.crs, "EPSG:4326", always_xy=True)
-lon, lat = transformer.transform(center[0], center[1])
-print(f"\nInsert lat, lon in Cesium: {lat}, {lon}")
-
-# Plotting (Notice camera position defaults look great because data is cleanly structured Z-up)
-pl = pv.Plotter()
-pl.add_mesh(mesh, scalars=mesh['color'], rgb=True, show_edges=False)
-pl.add_mesh(tree_mesh, color="green")
-pl.show(title='3D Z-Up Test')
+if __name__ == "__main__":
+    main()

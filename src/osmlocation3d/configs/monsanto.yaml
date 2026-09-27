@@ -1,0 +1,16 @@
+location:
+  name: "Parque florestal de Monsanto, Lisboa"
+
+bounding_box:
+  north: 38.74265
+  south: 38.73313
+  east: -9.18249
+  west: -9.20163
+
+projection:
+  epsg: 3763
+
+paths:
+  dem_dir: "GeoData/DEM_Files"
+  geoid_path: "GeoData/egm2008-2.5.tif"
+  output_dir: "output/Parque_florestal_de_Monsanto"

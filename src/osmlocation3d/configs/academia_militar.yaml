@@ -1,0 +1,16 @@
+location:
+  name: "Academia Militar, Amadora"
+
+bounding_box:
+  north: 38.756928
+  south: 38.748277
+  east: -9.239877
+  west: -9.243364
+
+projection:
+  epsg: 3763
+
+paths:
+  dem_dir: "GeoData/DEM_Files"
+  geoid_path: "GeoData/egm2008-2.5.tif"
+  output_dir: "output/Academia_Militar"
