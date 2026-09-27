@@ -1,0 +1,25 @@
+[project]
+name = "osmfilestests"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Rita-Barco", email = "rita.barco@tecnico.ulisboa.pt" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.2.6",
+    "osmnx>=2.0.7",
+    "pyproj>=3.7.1",
+    "pyvista>=0.49.0",
+    "rasterio>=1.4.4",
+    "shapely>=2.1.2",
+    "trimesh>=5.1.0",
+]
+
+[project.scripts]
+osmfilestests = "osmfilestests:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
