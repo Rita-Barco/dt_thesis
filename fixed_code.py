@@ -448,15 +448,15 @@ def save_to_gltf(mesh, output_path):
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Clone the mesh and fix the axis for glTF (Z-up to Y-up)
+    #Clone the mesh and fix the axis for glTF (Z-up to Y-up)
     export_mesh = mesh.copy()
     export_mesh.rotate_x(-90, inplace=True)
 
-    # 2. Clean and force strict triangulation
+    #Clean and force strict triangulation
     export_mesh = export_mesh.triangulate().clean()
     faces = export_mesh.faces.reshape((-1, 4))[:, 1:]
 
-    # 3. Create the trimesh object
+    #Create the trimesh object
     tm = trimesh.Trimesh(
         vertices=export_mesh.points,
         faces=faces,
